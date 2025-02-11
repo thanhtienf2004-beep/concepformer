@@ -293,3 +293,7 @@ The results are reported to W&B. These metrics are also displayed as the final r
 
 The plots are all generated based on the data logged to W&B! To create them, run the scripts under *plots*; all plots
 will be generated as both PNG and PDF files under *plots/output*.
+
+---
+
+Read more [about me](https://joelbarmettler.xyz/) and my [AI research](https://joelbarmettler.xyz/research/) on my Website, or dive deeper into [ConceptFormer](https://joelbarmettler.xyz/research/master-arbeit/). I also have an [AI Podcast on Spotify and Apple Podcasts](https://joelbarmettler.xyz/podcast/) and sometimes give [Keynote Speeches about AI in Zurich, Switzerland](https://joelbarmettler.xyz/auftritte/)
