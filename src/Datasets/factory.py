@@ -1,219 +1,56 @@
-import json
-from typing import Tuple, Dict
-
+from typing import Dict
 import networkx as nx
-from datasets import Dataset
 from tqdm import tqdm
-
-from src.Datasets.WebQSPFinetuneSentences import WebQSPFinetuneSentences
-from src.Datasets.WebQSPFinetuneStar import WebQSPFinetuneStar
-from src.Datasets.WebQSPSentences import WebQSPSentences
-from src.Datasets.WebQSPStar import WebQSPStar
-from src.Datasets.TRExBite import TRExBite
-from src.Datasets.TRExBiteLite import TRExBiteLite
-from src.Datasets.TriREx import TriREx
-from src.Datasets.TriRExLite import TriRExLite
-from src.Datasets.TREx import TREx
-from src.Datasets.TRExLite import TRExLite
 from src.Datasets.TRExStar import TRExStar
-from src.Datasets.TRExStarLite import TRExStarLite
+import json
 
-
-def trex_factory(dataset_name: str) -> Tuple[Dataset, Dataset, Dataset]:
-    if dataset_name == "TRExLite":
-        trex_builder = TRExLite()
-    elif dataset_name == "TREx":
-        trex_builder = TREx()
-    else:
-        raise ValueError(f"Unknown dataset {dataset_name}")
-
-    if not trex_builder.info.splits:
-        trex_builder.download_and_prepare()
-
-    train_dataset = trex_builder.as_dataset(split="train")
-
-    validation_dataset = trex_builder.as_dataset(split="validation")
-
-    test_dataset = trex_builder.as_dataset(split="test")
-    return train_dataset, validation_dataset, test_dataset
-
-def trex_star_factory(dataset_name: str) -> Dataset:
-    if dataset_name == "TRExStarLite":
-        trex_star_builder = TRExStarLite()
-    elif dataset_name == "TRExStar":
+def trex_star_factory(dataset_name):
+    """
+    Factory method to create a TRExStar dataset instance and prepare it.
+    """
+    if dataset_name in ["TRExStar", "trex_json_files"]:
         trex_star_builder = TRExStar()
-    else:
-        raise ValueError(f"Unknown dataset {dataset_name}")
-
-    if not trex_star_builder.info.splits:
         trex_star_builder.download_and_prepare()
+        # Trả về DatasetDict
+        dataset = trex_star_builder.as_dataset()
+        print(f"Debug: trex_star_factory returned dataset with splits: {dataset.keys()} from file {__file__}")
+        return dataset
+    raise ValueError(f"Dataset {dataset_name} not supported")
 
-    return trex_star_builder.as_dataset(split="all")
-
-
-def trex_bite_base_factory(dataset_name: str) -> Tuple[Dataset, Dataset, Dataset, Dict[str, nx.DiGraph]]:
-    if dataset_name == "TRExBiteLite":
-        trex_builder = TRExLite()
-        trex_star_builder = TRExStarLite()
-    elif dataset_name == "TRExBite":
-        trex_builder = TREx()
-        trex_star_builder = TRExStar()
-    else:
-        raise ValueError(f"Unknown dataset {dataset_name}")
-
-    if not trex_builder.info.splits:
-        trex_builder.download_and_prepare()
-
-    if not trex_star_builder.info.splits:
-        trex_star_builder.download_and_prepare()
-
-    graphs = {}
-    for datapoint in tqdm(trex_star_builder.as_dataset(split="all"), desc="Loading nx graphs"):
-        data = json.loads(datapoint['json'])
-        graphs[datapoint['entity']] = nx.node_link_graph(data)
-
-    train_dataset = trex_builder.as_dataset(split="train")
-    validation_dataset = trex_builder.as_dataset(split="validation")
-    test_dataset = trex_builder.as_dataset(split="test")
-
-    return train_dataset, validation_dataset, test_dataset, graphs
-
-def benchmark_base_factory(dataset_name: str) -> Dict[str, nx.DiGraph]:
-    if dataset_name.endswith("Lite"):
-        return trex_star_graphs_factory("TRExStarLite")
-    return trex_star_graphs_factory("TRExStar")
-
-def trex_star_graphs_factory(dataset_name: str)-> Dict[str, nx.DiGraph]:
+def trex_star_graphs_factory(dataset_name):
+    """
+    Factory method to create a dictionary of networkx graphs from a TRExStar dataset.
+    """
     dataset = trex_star_factory(dataset_name)
     graphs = {}
-    for datapoint in tqdm(dataset, desc="Loading nx graphs"):
-        data = json.loads(datapoint['json'])
-        graphs[datapoint['entity']] = nx.node_link_graph(data)
+    # Chọn split "train" và lấy độ dài
+    train_dataset = dataset['train']
+    print(f"Debug: Processing train dataset with length {len(train_dataset)} from file {__file__}")
+    for index in tqdm(range(len(train_dataset)), desc="Loading nx graphs"):
+        datapoint = train_dataset[index]  # Truy cập bằng chỉ số sau khi chọn split
+        # datapoint là dict chứa 'entity' và 'json'
+        entity = datapoint['entity']
+        json_data = datapoint['json']
+        print(f"Debug in factory: entity {entity}, json_data: {json_data}, type: {type(json_data)} from file {__file__}")  # Debug trong factory
+        # Đảm bảo json_data là dict
+        if isinstance(json_data, str):
+            try:
+                json_data = json.loads(json_data)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Failed to decode json_data for entity {entity}: {e}")
+        if not isinstance(json_data, dict):
+            raise ValueError(f"json_data for entity {entity} is not a dict: {json_data}")
+        # Chuyển đổi cấu trúc nếu cần
+        if "nodes" in json_data and isinstance(json_data["nodes"], dict) and "id" in json_data["nodes"]:
+            json_data["nodes"] = [{"id": id} for id in json_data["nodes"]["id"]]
+        if "links" in json_data and isinstance(json_data["links"], dict) and all(key in json_data["links"] for key in ["source", "target", "predicate"]):
+            json_data["links"] = [{"source": s, "target": t, "predicate": p} for s, t, p in zip(json_data["links"]["source"], json_data["links"]["target"], json_data["links"]["predicate"])]
+        # Kiểm tra cấu trúc nested
+        if "nodes" not in json_data or "links" not in json_data:
+            raise ValueError(f"Missing 'nodes' or 'links' key in json_data for entity {entity}: {json_data}")
+        if not isinstance(json_data["nodes"], list) or not all("id" in node for node in json_data["nodes"]):
+            raise ValueError(f"Invalid nodes structure in json_data for entity {entity}: {json_data}")
+        if not isinstance(json_data["links"], list) or not all("source" in link and "target" in link and "predicate" in link for link in json_data["links"]):
+            raise ValueError(f"Invalid links structure in json_data for entity {entity}: {json_data}")
+        graphs[entity] = nx.node_link_graph(json_data, edges="links")
     return graphs
-
-
-def trex_bite_factory(dataset_name: str) -> Tuple[Dataset, Dataset, Dataset]:
-    if dataset_name == "TRExBiteLite":
-        trex_bite_builder = TRExBiteLite()
-    elif dataset_name == "TRExBite":
-        trex_bite_builder = TRExBite()
-    else:
-        raise ValueError(f"Unknown dataset {dataset_name}")
-
-    if not trex_bite_builder.info.splits:
-        trex_bite_builder.download_and_prepare()
-
-    train_dataset = trex_bite_builder.as_dataset(split="train")
-    validation_dataset = trex_bite_builder.as_dataset(split="validation")
-    test_dataset = trex_bite_builder.as_dataset(split="test")
-    return train_dataset, validation_dataset, test_dataset
-
-def trirex_factory(dataset_name: str) -> Tuple[Dataset, Dataset, Dataset]:
-    if dataset_name == "TriRExLite":
-        trirex_builder = TriRExLite()
-    elif dataset_name == "TriREx":
-        trirex_builder = TriREx()
-    else:
-        raise ValueError(f"Unknown dataset {dataset_name}")
-
-    if not trirex_builder.info.splits:
-        trirex_builder.download_and_prepare()
-
-    train_dataset = trirex_builder.as_dataset(split="train")
-    validation_dataset = trirex_builder.as_dataset(split="validation")
-    test_dataset = trirex_builder.as_dataset(split="test")
-
-    return train_dataset, validation_dataset, test_dataset
-
-def rex_factory(dataset_name: str) -> Tuple[Dataset, Dataset, Dataset, Dict[str, nx.DiGraph]]:
-    if dataset_name == "TRExBiteLite":
-        dataset_builder = TRExBiteLite()
-        trex_star_builder = TRExStarLite()
-    elif dataset_name == "TRExBite":
-        dataset_builder = TRExBite()
-        trex_star_builder = TRExStar()
-    elif dataset_name == "TriRExLite":
-        dataset_builder = TriRExLite()
-        trex_star_builder = TRExStarLite()
-    elif dataset_name == "TriREx":
-        dataset_builder = TriREx()
-        trex_star_builder = TRExStar()
-    else:
-        raise ValueError(f"Unknown dataset {dataset_name}")
-
-    if not dataset_builder.info.splits:
-        dataset_builder.download_and_prepare()
-
-    if not trex_star_builder.info.splits:
-        trex_star_builder.download_and_prepare()
-
-    train_dataset = dataset_builder.as_dataset(split="train")
-    validation_dataset = dataset_builder.as_dataset(split="validation")
-    test_dataset = dataset_builder.as_dataset(split="test")
-
-    graphs = {}
-    for datapoint in tqdm(trex_star_builder.as_dataset(split="all"), desc="Loading nx graphs"):
-        data = json.loads(datapoint['json'])
-        graphs[datapoint['entity']] = nx.node_link_graph(data)
-
-    return train_dataset, validation_dataset, test_dataset, graphs
-
-def rex_raw_factory(dataset_name: str) -> Tuple[Dataset, Dataset, Dataset]:
-    if dataset_name == "TRExBiteLite":
-        dataset_builder = TRExBiteLite()
-    elif dataset_name == "TRExBite":
-        dataset_builder = TRExBite()
-    elif dataset_name == "TriRExLite":
-        dataset_builder = TriRExLite()
-    elif dataset_name == "TriREx":
-        dataset_builder = TriREx()
-    else:
-        raise ValueError(f"Unknown dataset {dataset_name}")
-
-    if not dataset_builder.info.splits:
-        dataset_builder.download_and_prepare()
-
-    train_dataset = dataset_builder.as_dataset(split="train")
-    validation_dataset = dataset_builder.as_dataset(split="validation")
-    test_dataset = dataset_builder.as_dataset(split="test")
-
-    return train_dataset, validation_dataset, test_dataset
-
-def web_qsp_factory() -> Tuple[Dataset, Dict[str, nx.DiGraph]]:
-    web_qsp_sentence_builder = WebQSPSentences()
-    web_qsp_star_builder = WebQSPStar()
-
-    if not web_qsp_sentence_builder.info.splits:
-        web_qsp_sentence_builder.download_and_prepare()
-
-    if not web_qsp_star_builder.info.splits:
-        web_qsp_star_builder.download_and_prepare()
-
-    test_dataset = web_qsp_sentence_builder.as_dataset(split="test")
-
-    graphs = {}
-    for datapoint in tqdm(web_qsp_star_builder.as_dataset(split="all"), desc="Loading nx graphs"):
-        data = json.loads(datapoint['json'])
-        graphs[datapoint['entity']] = nx.node_link_graph(data)
-
-    return test_dataset, graphs
-
-def web_qsp_finetune_factory() -> Tuple[Dataset, Dataset, Dict[str, nx.DiGraph]]:
-    web_qsp_sentence_builder = WebQSPFinetuneSentences()
-    web_qsp_star_builder = WebQSPFinetuneStar()
-
-    if not web_qsp_sentence_builder.info.splits:
-        web_qsp_sentence_builder.download_and_prepare()
-
-    if not web_qsp_star_builder.info.splits:
-        web_qsp_star_builder.download_and_prepare()
-
-    train_dataset = web_qsp_sentence_builder.as_dataset(split="train")
-    test_dataset = web_qsp_sentence_builder.as_dataset(split="test")
-
-    graphs = {}
-    for datapoint in tqdm(web_qsp_star_builder.as_dataset(split="all"), desc="Loading nx graphs"):
-        data = json.loads(datapoint['json'])
-        graphs[datapoint['entity']] = nx.node_link_graph(data)
-
-    return train_dataset, test_dataset, graphs

@@ -178,8 +178,7 @@ gpt2_n_neighbors_search_lite_dynamic_nested = [
         ) for num_neighbors in [100]
     ] for num_pseudo_words in [1, 2, 3, 4, 5, 10, 15, 25]
 ]
-gpt2_n_neighbors_search_lite_dynamic = [item for sublist in gpt2_n_neighbors_search_lite_dynamic_nested for item in
-                                        sublist]
+gpt2_n_neighbors_search_lite_dynamic = [item for sublist in gpt2_n_neighbors_search_lite_dynamic_nested for item in sublist]
 
 gpt2_n_neighbors_search_dynamic_nested = [
     [
@@ -204,12 +203,11 @@ gpt2_n_neighbors_search_dynamic_nested = [
             pretrained_model_name="",
             trained_model_name="",
             pretrained_path="",
-            trained_path="",
+            trained_path=Path("C:/Users/thanh/ConceptFormer/data/models/SentenceFormer_DynamicBatches_NoGlobalAlignment/gpt2/TriREx-TRExBite/trained/checkpoints/trained-gpt2-TriREx-TRExBite-trained-1x1.6_100to1.pth"),  # Cập nhật đường dẫn thực tế
             pretrained_checkpoint_directory="",
             trained_checkpoint_directory="",
             ignore_global_alignment=True,
         ) for num_neighbors in [100]
     ] for num_pseudo_words in [1]
 ]
-gpt2_n_neighbors_search_dynamic = [item for sublist in gpt2_n_neighbors_search_dynamic_nested for item in
-                                   sublist]
+gpt2_n_neighbors_search_dynamic = [item for sublist in gpt2_n_neighbors_search_dynamic_nested for item in sublist]

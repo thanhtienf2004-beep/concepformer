@@ -1,14 +1,25 @@
+from src.LLM.LLM import LLM
+from transformers import AutoModel, AutoTokenizer
 import torch
 
-from src.LLM.GPT2 import GPT2
-from src.LLM.LLM import LLM
-from src.LLM.Llama2 import Llama2
+def llm_factory(embedding_llm_type, embedding_llm_name, batch_size, device, bits=None):
+    """Tạo instance của mô hình ngôn ngữ dựa trên loại và tên."""
+    if embedding_llm_type.lower() == "gpt-2":
+        class GPT2LLM(LLM):
+            def __init__(self, model_name_or_path, device):
+                super().__init__(model_name_or_path, device)
+                self.batch_size = batch_size
 
+            def embed(self, texts):
+                """Tạo embedding cho một danh sách các đoạn text."""
+                inputs = self._tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self._device)
+                outputs = self._model(**inputs)
+                return outputs.last_hidden_state.mean(dim=1)
 
-def llm_factory(llm_type: str, embedding_llm_name: str, batch_size: int, device: torch.device, bits: int) -> LLM:
-    if llm_type == "gpt-2":
-        return GPT2(model_name_or_path=embedding_llm_name, max_batch_size=batch_size, device=device)
-    elif llm_type == "llama-2":
-        return Llama2(model_name_or_path=embedding_llm_name, max_batch_size=batch_size, device=device, bits=bits)
+        return GPT2LLM(embedding_llm_name, device)
     else:
-        raise ValueError(f"Unknown model type {llm_type}")
+        raise ValueError(f"Unsupported LLM type: {embedding_llm_type}")
+
+    # Nếu bits (quantization) được cung cấp, có thể thêm logic tối ưu hóa sau
+    if bits is not None:
+        print(f"Quantization with {bits} bits is not implemented yet.")

@@ -1,136 +1,85 @@
-import argparse
-import logging
-import multiprocessing
-import random
-from pathlib import Path
-from typing import Dict, List
-
-import networkx as nx
-import numpy
-import numpy as np
-import torch
-from tqdm import tqdm
-
-from src.Datasets.factory import trex_star_graphs_factory
 from src.GraphAligner.BigGraphAligner import BigGraphAligner
-from src.Config.train_sentences_config import TrainSentencesConfig, gpt2_n_neighbors_search_nested, \
-    gpt2_n_neighbors_search_lite_nested, gpt2_n_neighbors_search_dynamic
-from src.LLM.factory import llm_factory
-from src.Model.GraphAttentionEmbedder.GraphAttentionEmbedder import GraphAttentionEmbedder
+from src.LLM.LLM import LLM
+import torch
+import re
+import os
 
-SEED = 1
-torch.manual_seed(SEED)
-torch.cuda.manual_seed_all(SEED)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-numpy.random.seed(SEED)
-random.seed(SEED)
-
-# Set up argument parser
-parser = argparse.ArgumentParser(description='Process dataset name and version.')
-parser.add_argument('--gpu_indices', nargs='*', type=int, default=[1],
-                    help='List of GPU indices to use')
-parser.add_argument('--n_processes_per_gpu', type=int, default=1,
-                    help='Number of Processes per GPU')
-
-args = parser.parse_args()
-GPU_INDICES = args.gpu_indices
-N_PROCESSES_PER_GPU = args.n_processes_per_gpu
-
-script_directory = Path(__file__).parent
-data_directory = script_directory / "data"
-output_directory = data_directory / f"output/ConceptFormer/"
-output_directory.mkdir(parents=True, exist_ok=True)
-
-
-def main(config: TrainSentencesConfig, graphs: Dict[str, nx.DiGraph], gpu=0):
-    device = torch.device(f"cuda:{gpu}")
-
-    publish_directory = output_directory / f"{config.num_pseudo_words}_context_vectors"
-    publish_directory.mkdir(parents=True, exist_ok=True)
-
-    llm = llm_factory(
-        config.embedding_llm_type,
-        config.embedding_llm_name,
-        batch_size=1,
-        device=device,
-        bits=config.quanization
-    )
-
+def main(config, graphs, device):
+    llm = LLM()
+    # Tạo embeddings ban đầu
     graph_aligner = BigGraphAligner(llm, graphs, config.graph_dataset_name, use_untrained=True)
+    graph_aligner.prepare()
+    graph_aligner.build_index()
 
-    graph_embedder = GraphAttentionEmbedder.from_config(config, llm)
+    # Khởi tạo và huấn luyện baseline (không dùng KG)
+    baseline_model = BigGraphAligner(llm, graphs, config.graph_dataset_name, use_untrained=False, use_kg=False, epochs=20)
+    optimizer_base = torch.optim.Adam(baseline_model.parameters(), lr=0.001)
+    train_data = None  # Khởi tạo train_data với giá trị mặc định
+    # Giả sử train_data từ WebQSP hoặc T-Rex Star
+    try:
+        train_data = torch.load("data/webqsp/train.pt")  # Cần chuyển đổi trước
+        baseline_model.train(train_data, optimizer_base, device)
+    except FileNotFoundError:
+        print("File train.pt không tồn tại. Bỏ qua huấn luyện baseline.")
+    # Tạo thư mục model_checkpoint nếu không tồn tại
+    os.makedirs("model_checkpoint", exist_ok=True)
+    torch.save(baseline_model.state_dict(), "model_checkpoint/baseline_model.pth")
 
-    if not config.trained_path.exists():
-        print("Skipping untrained ConceptFormer")
-        return
+    # Khởi tạo và huấn luyện ConceptFormer (dùng KG)
+    conceptformer_model = BigGraphAligner(llm, graphs, config.graph_dataset_name, use_untrained=False, use_kg=True, epochs=20)
+    optimizer_cf = torch.optim.Adam(conceptformer_model.parameters(), lr=0.01)
+    embeddings = graph_aligner.node_embedding_batch(list(graph_aligner.entity_index.keys()))
+    if train_data is not None:
+        conceptformer_model.train(train_data, optimizer_cf, device, embeddings)
+    # Tạo thư mục model_checkpoint nếu không tồn tại
+    os.makedirs("model_checkpoint", exist_ok=True)
+    torch.save(conceptformer_model.state_dict(), "model_checkpoint/conceptformer_trained.pth")
 
-    graph_embedder.load_state_dict(torch.load(config.trained_path, map_location=f'cuda:{gpu}'))
-    graph_embedder = graph_embedder.to(device)
-    graph_embedder.eval()
+    # Đánh giá (cần test data)
+    try:
+        test_data = torch.load("data/webqsp/test.pt")  # Cần chuyển đổi trước
+        def evaluate(model, kg_embeds=None):
+            model.eval()
+            total, correct = 0, 0
+            with torch.no_grad():
+                for batch in test_data:
+                    input_ids, attention_mask, labels = batch[:3]  # Giả sử định dạng
+                    outputs = model(input_ids.to(device), attention_mask.to(device), kg_embeds.to(device) if kg_embeds is not None else None)
+                    preds = torch.argmax(outputs, dim=-1)
+                    correct += (preds == labels.to(device)).sum().item()
+                    total += labels.size(0)
+            return correct / total if total > 0 else 0.0
 
-    subject_graph_map = list(graphs.items())
-    random.shuffle(subject_graph_map)
+        base_acc = evaluate(baseline_model)
+        cf_embeds = graph_aligner.node_embedding_batch(test_data[0][3]) if test_data[0][3] else None
+        cf_acc = evaluate(conceptformer_model, cf_embeds)
+        print(f"Accuracy Baseline: {base_acc:.4f}")
+        print(f"Accuracy ConceptFormer: {cf_acc:.4f}")
+    except FileNotFoundError:
+        print("File test.pt không tồn tại. Bỏ qua đánh giá.")
 
-    for subject_id, G in tqdm(subject_graph_map, desc="SentenceFormer Lookup Table"):
-        subject_file_path = publish_directory / f"{subject_id}.npy"
+    # Hỏi-đáp
+    def answer_question(model, graph_aligner, llm, question):
+        entities = re.findall(r'Q\d+', question)
+        embeddings = graph_aligner.node_embedding_batch(entities) if entities and model.use_kg else None
+        input_ids = llm.tokenize(question)
+        attention_mask = torch.ones_like(input_ids)
+        with torch.no_grad():
+            outputs = model(input_ids.to(device), attention_mask.to(device), embeddings.to(device) if embeddings is not None else None)
+            return llm.late_generate_from_logits(outputs)
 
-        if subject_file_path.exists() or subject_id not in graph_aligner.entity_index:
-            logging.info(f"Embedding for subject_id {subject_id} already exists. Skipping...")
-            continue
-
-        central_node_embedding = graph_aligner.node_embedding_batch([subject_id]).unsqueeze(0)
-
-        neighbour_ids, edge_ids, ranks = [], [], []
-        for central_node_id, neighbour_node_id, edge in G.edges(data=True):
-            edge_ids.append(edge['id'])
-            neighbour_ids.append(neighbour_node_id)
-            ranks.append(G.nodes[neighbour_node_id]['rank'])
-
-        if len(neighbour_ids) == 0:
-            continue
-
-        combined = zip(neighbour_ids, edge_ids, ranks)
-        sorted_combined = sorted(combined, key=lambda x: x[2], reverse=True)
-        neighbour_ids, edge_ids, _ = zip(*sorted_combined)
-        neighbour_ids, edge_ids = list(neighbour_ids), list(edge_ids)
-
-        node_embeddings = graph_aligner.node_embedding_batch(neighbour_ids).unsqueeze(0)
-        edge_embeddings = graph_aligner.edge_embedding_batch(edge_ids).unsqueeze(0)
-
-        graph_embeddings = graph_embedder(central_node_embedding, node_embeddings, edge_embeddings)
-
-        # Save the embedding as a numpy array
-        np.save(subject_file_path, graph_embeddings.cpu().detach().numpy())
-
-def process_function(config_queue, graphs, gpu):
     while True:
-        try:
-            config = config_queue.get_nowait()
-        except multiprocessing.queues.Empty:
+        question = input("Vui lòng nhập câu hỏi (nhập 'quit' để thoát): ")
+        if question.lower() == 'quit':
             break
-
-        print(f"Processing config on GPU {gpu}")
-        main(config, graphs, gpu)
-
+        base_answer = answer_question(baseline_model, graph_aligner, llm, question)
+        cf_answer = answer_question(conceptformer_model, graph_aligner, llm, question)
+        print("Câu hỏi:", question)
+        print("Trả lời Baseline:", base_answer)
+        print("Trả lời ConceptFormer:", cf_answer)
 
 if __name__ == "__main__":
-    multiprocess_gpu_indices = [element for element in GPU_INDICES for _ in range(N_PROCESSES_PER_GPU)]
-
-    configs = gpt2_n_neighbors_search_dynamic
-
-    # Create a multiprocessing queue and add all configurations to it
-    config_queue = multiprocessing.Queue()
-    for config in configs:
-        config_queue.put(config)
-
-    graphs = trex_star_graphs_factory(configs[0].graph_dataset_name)
-
-    processes = []
-    for gpu in multiprocess_gpu_indices:
-        p = multiprocessing.Process(target=process_function, args=(config_queue, graphs, gpu))
-        processes.append(p)
-        p.start()
-
-    for p in processes:
-        p.join()
+    device = torch.device("cpu")
+    config = type('Config', (), {'graph_dataset_name': 'TRExStar'})()  # Placeholder
+    graphs = {}  # Giả sử đã tải từ factory.py
+    main(config, graphs, device)
